@@ -1,0 +1,10 @@
+pushd ./ngp_pl
+pip install torch-scatter==2.0.6
+pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
+
+git clone https://github.com/NVIDIA/apex
+pushd apex
+pip install -v --disable-pip-version-check --global-option="--cuda_ext" --no-cache-dir ./ 
+popd
+pip install -r requirements.txt
+popd
