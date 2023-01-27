@@ -50,6 +50,7 @@ class NSVFDataset(BaseDataset):
             K[:2] *= self.downsample
 
         self.K = torch.FloatTensor(K)
+        print(K)
         self.directions = get_ray_directions(h, w, self.K)
         self.img_wh = (w, h)
 
@@ -73,8 +74,8 @@ class NSVFDataset(BaseDataset):
                 self.poses += [c2w]
         else:
             if split == 'train': prefix = '0_'
-            elif split == 'trainval': prefix = '[0-1]_'
-            elif split == 'trainvaltest': prefix = '[0-2]_'
+            elif split == 'trainval': prefix = '1_' #[0-1]_
+            elif split == 'trainvaltest': prefix = '2_'
             elif split == 'val': prefix = '1_'
             elif 'Synthetic' in self.root_dir: prefix = '2_' # test set for synthetic scenes
             elif split == 'test': prefix = '1_' # test set for real scenes
@@ -83,11 +84,17 @@ class NSVFDataset(BaseDataset):
             poses = sorted(glob.glob(os.path.join(self.root_dir, 'pose', prefix+'*.txt')))
 
             print(f'Loading {len(img_paths)} {split} images ...')
+            counter = 0
             for img_path, pose in tqdm(zip(img_paths, poses)):
                 c2w = np.loadtxt(pose)[:3]
                 c2w[:, 3] -= self.shift
                 c2w[:, 3] /= 2*self.scale # to bound the scene inside [-0.5, 0.5]
                 self.poses += [c2w]
+                
+                save = np.eye(4)
+                save[:3,:4] = c2w
+                np.savetxt(f'/home/maturk/git/ObjectReconstructor/ngp_pl/datasets/debug/Lego/{counter}.txt', save)
+                counter +=1
 
                 img = read_image(img_path, self.img_wh)
                 if 'Jade' in self.root_dir or 'Fountain' in self.root_dir:

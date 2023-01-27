@@ -8,6 +8,7 @@ import numpy as np
 
 from .rendering import NEAR_DISTANCE
 
+USE_PRIOR = True
 
 class NGP(nn.Module):
     def __init__(self, scale, rgb_act='Sigmoid'):
@@ -21,10 +22,17 @@ class NGP(nn.Module):
         self.register_buffer('xyz_min', -torch.ones(1, 3)*scale)
         self.register_buffer('xyz_max', torch.ones(1, 3)*scale)
         self.register_buffer('half_size', (self.xyz_max-self.xyz_min)/2)
+        
+        self.grid_size = 128
 
         # each density grid covers [-2^(k-1), 2^(k-1)]^3 for k in [0, C-1]
-        self.cascades = max(1+int(np.ceil(np.log2(2*scale))), 1)
-        self.grid_size = 128
+        if USE_PRIOR: 
+            self.cascades = 1
+        else: 
+            self.cascades = 2
+            
+        #self.cascades = 2 # max(1+int(np.ceil(np.log2(2*scale))), 1)
+        print('Cascades: ', self.cascades)
         self.register_buffer('density_bitfield',
             torch.zeros(self.cascades*self.grid_size**3//8, dtype=torch.uint8))
 
@@ -151,6 +159,7 @@ class NGP(nn.Module):
                 rgbs = self.log_radiance_to_rgb(rgbs, **kwargs)
 
         return sigmas, rgbs
+    
 
     @torch.no_grad()
     def get_all_cells(self):
@@ -163,9 +172,50 @@ class NGP(nn.Module):
         """
         indices = vren.morton3D(self.grid_coords).long()
         cells = [(indices, self.grid_coords)] * self.cascades
-
+        return cells
+    
+    @torch.no_grad()
+    def get_prior_shape(self):
+        """
+        Initialize density grid with prior shape prediction network
+        """
+        MAX_SAMPLES = 1024
+        #density_threshold = 0.01*MAX_SAMPLES/3**0.5
+        DENSITY_TRESHOLD = 0.1
+        prior = torch.Tensor(np.load('/home/maturk/git/ObjectReconstructor/ngp_pl/CustomData/bowl/2880940_b4c43b75d951401631f299e87625dbae_pred_grid.npy')).type(torch.float32).to(device=self.density_grid.device)
+        prior = prior.sigmoid()
+        prior[prior < 0] = 0
+        print('prior shape is', prior.shape)
+        cells = []
+        for c in range(self.cascades):
+            coords = torch.nonzero(prior>DENSITY_TRESHOLD)[:,1:]
+            coords = coords[:,[2,0,1]] # x y z -> z x y
+            indices = vren.morton3D(coords.int().contiguous().cuda()).long()
+            #import os
+            #np.save(os.path.join('/home/maturk/git/ObjectReconstructor/ngp_pl/CustomData/pepsi/', 'coords.npy'), coords.cpu().detach().numpy())
+            cells += [[indices, coords]] * self.cascades
         return cells
 
+    
+    @torch.no_grad()
+    def sample_occupied_cells(self, M, density_threshold):
+        cells = []
+        #M = 11795456
+        DENSITY_TRESHOLD = 0.1
+        density_threshold = DENSITY_TRESHOLD
+        for c in range(self.cascades):
+            # occupied cells
+            indices2 = torch.nonzero(self.density_grid[c]>density_threshold)[:, 0]
+            if len(indices2)>0:
+                rand_idx = torch.randint(len(indices2), (M,),
+                                         device=self.density_grid.device)
+                indices2 = indices2[rand_idx]
+            coords2 = vren.morton3D_invert(indices2.int())
+            # concatenate
+            cells += [(indices2, coords2)]
+        
+        return cells
+    
     @torch.no_grad()
     def sample_uniform_and_occupied_cells(self, M, density_threshold):
         """
@@ -191,7 +241,7 @@ class NGP(nn.Module):
             coords2 = vren.morton3D_invert(indices2.int())
             # concatenate
             cells += [(torch.cat([indices1, indices2]), torch.cat([coords1, coords2]))]
-
+        
         return cells
 
     @torch.no_grad()
@@ -215,7 +265,8 @@ class NGP(nn.Module):
             indices, coords = cells[c]
             for i in range(0, len(indices), chunk):
                 xyzs = coords[i:i+chunk]/(self.grid_size-1)*2-1
-                s = min(2**(c-1), self.scale)
+                #s = min(2**(c-1), self.scale)
+                s = min(2**c, self.scale)
                 half_grid_size = s/self.grid_size
                 xyzs_w = (xyzs*(s-half_grid_size)).T # (3, chunk)
                 xyzs_c = w2c_R @ xyzs_w + w2c_T # (N_cams, 3, chunk)
@@ -237,6 +288,73 @@ class NGP(nn.Module):
                 self.density_grid[c, indices[i:i+chunk]] = \
                     torch.where(valid_mask, 0., -1.)
 
+
+    @torch.no_grad()
+    def update_density_grid_with_prior(self, density_threshold, warmup=False, decay=0.99, erode=False): #decay 0.95
+        density_grid_tmp = torch.zeros_like(self.density_grid)
+        if warmup: # during the first steps
+            cells = self.get_prior_shape()
+            print('Warmup:')
+            print(cells)
+            for pow in range(2):
+                for i in range(0):
+                    sign = (-1)**pow
+                    x = cells[0][1] + sign* torch.Tensor([2**i,0,0]).cuda()
+                    indices_x = vren.morton3D(x.int().contiguous().cuda()).long()
+                    y = cells[0][1] + sign*torch.Tensor([0,2**i,0]).cuda()
+                    indices_y = vren.morton3D(y.int().contiguous().cuda()).long()
+                    z = cells[0][1] + sign*torch.Tensor([0,0,2**i]).cuda()
+                    indices_z = vren.morton3D(z.int().contiguous().cuda()).long()
+                    cells[0][1] = torch.cat([cells[0][1],x,y,z])
+                    cells[0][0] = torch.cat([cells[0][0],indices_x,indices_y,indices_z])
+                    print(cells[0][0].shape, cells[0][1].shape)
+            print(cells[0][0].shape, cells[0][1].shape)
+            cells[0][0] = cells[0][0].repeat((2,))
+            cells[0][1] = cells[0][1].repeat((2,1))
+            print(cells[0][0].shape, cells[0][1].shape)
+            print(cells[0][0].shape, cells[0][1].shape)
+            
+            # Update density grid and density prior
+            self.density_grid[0, cells[0][0]] = 50
+            self.density_prior[0, cells[0][0]] = 50
+        else:
+            cells = self.sample_occupied_cells(self.grid_size**3//4, density_threshold)
+            print(cells[0][0].shape, cells[0][1].shape)
+        for c in range(self.cascades):
+            indices, coords = cells[c]
+            s = 1
+            half_grid_size = s/self.grid_size
+            #coords [x, y, z] maps to xyzs [x, y, z]. Coords [0,0,0] maps to xyzs [-scale, -scale, -scale]
+            xyzs_w = (coords/(self.grid_size-1)*2-1)*(s-half_grid_size)
+            #print('cascade: ', c)
+            #print(torch.sort(xyzs_w, axis = 0))
+            # pick random position in the cell by adding noise in [-hgs, hgs]
+            xyzs_w += (torch.rand_like(xyzs_w)*2-1) * half_grid_size
+            #print(torch.sort(xyzs_w, axis = 0))
+            density_grid_tmp[c, indices] = self.density(xyzs_w)
+            print('temp: ')
+            print(density_grid_tmp[c, indices], 'max is, ' ,torch.max(density_grid_tmp[c, indices]))
+            print('prev: ')
+            print(self.density_grid[c, indices], 'max is, ' ,torch.max(self.density_grid[c, indices]))
+            
+            
+            #print('denstity grid', density_grid_tmp[density_grid_tmp>0])
+            #print('density grid max ', torch.max(density_grid_tmp), ' min ', torch.min(density_grid_tmp))
+
+        self.density_grid = \
+            torch.where(self.density_grid<0,
+                        self.density_grid,
+                        torch.maximum(self.density_grid*decay, density_grid_tmp))
+        self.density_prior = \
+            torch.where(self.density_grid<0,
+                        self.density_grid,
+                        torch.maximum(self.density_grid, density_grid_tmp))
+            
+        mean_density = self.density_grid[self.density_grid>0].mean().item()
+        vren.packbits(self.density_grid, min(mean_density, density_threshold),
+                      self.density_bitfield)
+    
+    
     @torch.no_grad()
     def update_density_grid(self, density_threshold, warmup=False, decay=0.95, erode=False):
         density_grid_tmp = torch.zeros_like(self.density_grid)
@@ -245,15 +363,25 @@ class NGP(nn.Module):
         else:
             cells = self.sample_uniform_and_occupied_cells(self.grid_size**3//4,
                                                            density_threshold)
+        
         # infer sigmas
         for c in range(self.cascades):
             indices, coords = cells[c]
+            #s = min(2**(c-1), self.scale)
+            # Change grid size to [-2^(k-1), 2^(k-1)]^3 for k in [0, C-1]
             s = min(2**(c-1), self.scale)
+            #print('s is: ', s, 'casdades is: ', c, 'erode is: ', erode, 'grid size: ', self.grid_size)
             half_grid_size = s/self.grid_size
+            #coords [x, y, z] maps to xyzs [x, y, z]. Coords [0,0,0] maps to xyzs [-scale, -scale, -scale]
             xyzs_w = (coords/(self.grid_size-1)*2-1)*(s-half_grid_size)
+            print(torch.sort(xyzs_w, axis = 0))
+            
             # pick random position in the cell by adding noise in [-hgs, hgs]
             xyzs_w += (torch.rand_like(xyzs_w)*2-1) * half_grid_size
+            print(torch.sort(xyzs_w, axis = 0))
             density_grid_tmp[c, indices] = self.density(xyzs_w)
+            #print('denstity grid', density_grid_tmp[density_grid_tmp>0])
+            print('density grid max ', torch.max(density_grid_tmp), ' min ', torch.min(density_grid_tmp))
 
         if erode:
             # My own logic. decay more the cells that are visible to few cameras
@@ -267,3 +395,11 @@ class NGP(nn.Module):
 
         vren.packbits(self.density_grid, min(mean_density, density_threshold),
                       self.density_bitfield)
+    
+    torch.no_grad()
+    def get_density_grid(self):
+        return self.density_grid
+    
+    torch.no_grad()
+    def get_density_prior(self):
+        return self.density_prior

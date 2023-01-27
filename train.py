@@ -3,6 +3,7 @@ from torch import nn
 from opt import get_opts
 import os
 import glob
+import vren
 import imageio
 import numpy as np
 import cv2
@@ -55,7 +56,10 @@ class NeRFSystem(LightningModule):
         super().__init__()
         self.save_hyperparameters(hparams)
 
-        self.warmup_steps = 256
+        self.USE_PRIOR=True
+        
+        if self.USE_PRIOR : self.warmup_steps = 1
+        else: self.warmup_steps = 2*256#256
         self.update_interval = 16
 
         self.loss = NeRFLoss(lambda_distortion=self.hparams.distortion_loss_w)
@@ -70,17 +74,24 @@ class NeRFSystem(LightningModule):
         rgb_act = 'None' if self.hparams.use_exposure else 'Sigmoid'
         self.model = NGP(scale=self.hparams.scale, rgb_act=rgb_act)
         G = self.model.grid_size
+        
+        # Register buffers
         self.model.register_buffer('density_grid',
             torch.zeros(self.model.cascades, G**3))
+        self.model.register_buffer('density_prior',
+            torch.zeros(self.model.cascades, G**3))
         self.model.register_buffer('grid_coords',
-            create_meshgrid3d(G, G, G, False, dtype=torch.int32).reshape(-1, 3))
-
+            create_meshgrid3d(G, G, G, False, dtype=torch.int32).reshape(-1, 3)) # DxHxWx3 = [zs, xs, ys]
+        
     def forward(self, batch, split):
         if split=='train':
             poses = self.poses[batch['img_idxs']]
             directions = self.directions[batch['pix_idxs']]
         else:
-            poses = batch['pose']
+            try:
+                poses = batch['pose']
+            except:
+                poses = self.poses[batch['img_idxs']]
             directions = self.directions
 
         if self.hparams.optimize_ext:
@@ -93,7 +104,8 @@ class NeRFSystem(LightningModule):
         kwargs = {'test_time': split!='train',
                   'random_bg': self.hparams.random_bg}
         if self.hparams.scale > 0.5:
-            kwargs['exp_step_factor'] = 1/256
+            #Here was the bug
+            kwargs['exp_step_factor'] = 0 #1/256
         if self.hparams.use_exposure:
             kwargs['exposure'] = batch['exposure']
 
@@ -101,6 +113,7 @@ class NeRFSystem(LightningModule):
 
     def setup(self, stage):
         dataset = dataset_dict[self.hparams.dataset_name]
+        print('Dataset Name ', dataset, self.hparams.dataset_name)
         kwargs = {'root_dir': self.hparams.root_dir,
                   'downsample': self.hparams.downsample}
         self.train_dataset = dataset(split=self.hparams.split, **kwargs)
@@ -152,12 +165,19 @@ class NeRFSystem(LightningModule):
                           pin_memory=True)
 
     def on_train_start(self):
-        self.model.mark_invisible_cells(self.train_dataset.K.to(self.device),
-                                        self.poses,
-                                        self.train_dataset.img_wh)
-
+        #self.model.mark_invisible_cells(self.train_dataset.K.to(self.device),
+        #                                self.poses,
+        #                                self.train_dataset.img_wh)
+        pass
+    
     def training_step(self, batch, batch_nb, *args):
-        if self.global_step%self.update_interval == 0:
+        if self.USE_PRIOR == True:
+            if self.global_step%self.update_interval == 0:
+                self.model.update_density_grid_with_prior(0.01*MAX_SAMPLES/3**0.5,
+                                            warmup=self.global_step<self.warmup_steps,
+                                            erode=False)
+        
+        elif self.global_step%self.update_interval == 0:
             self.model.update_density_grid(0.01*MAX_SAMPLES/3**0.5,
                                            warmup=self.global_step<self.warmup_steps,
                                            erode=self.hparams.dataset_name=='colmap')
@@ -181,16 +201,45 @@ class NeRFSystem(LightningModule):
         # volume rendering samples per ray (stops marching when transmittance drops below 1e-4)
         self.log('train/vr_s', results['vr_samples']/len(batch['rgb']), True)
         self.log('train/psnr', self.train_psnr, True)
-
+        
         return loss
 
+    def on_train_end(self):
+        print('Training has finished')
+        tresh = 50
+        self.model.density_prior = self.model.get_density_prior()
+        self.model.density_grid = self.model.get_density_grid()
+        print('Prior', torch.count_nonzero(self.model.density_prior), self.model.density_prior.shape)
+        optimized_prior = torch.zeros(self.model.cascades, self.model.grid_size**3)
+        optimized_prior = \
+            torch.where(self.model.density_grid<tresh,
+                        0,
+                        self.model.density_grid)
+        
+        indices = torch.nonzero(optimized_prior)[:,1]
+        print('indices shape', indices.shape)
+        print('indices ', indices)
+        print('Optimized prior: ', torch.count_nonzero(optimized_prior))
+        print('morton stuff', optimized_prior.shape)
+        print(optimized_prior)
+        coords = vren.morton3D_invert(indices.int()).long()
+        coords = coords[:,[1,2,0]] # z x y - x y z
+        print('coords',coords)
+        print('coords shape ', coords.shape)
+        optimized_grid = torch.zeros((self.model.grid_size, self.model.grid_size, self.model.grid_size))
+        optimized_grid[coords.detach().cpu().numpy().T] = 1
+        print('after', optimized_grid.shape)
+        print(optimized_grid)
+        print('num non zero', torch.count_nonzero(optimized_grid))
+        np.save(os.path.join('/home/maturk/git/ObjectReconstructor/ngp_pl/CustomData/bowl', 'optimised_grid.npy'), optimized_grid.cpu().detach().numpy())
+        
     def on_validation_start(self):
         torch.cuda.empty_cache()
         if not self.hparams.no_save_test:
             self.val_dir = f'results/{self.hparams.dataset_name}/{self.hparams.exp_name}'
             os.makedirs(self.val_dir, exist_ok=True)
 
-    def validation_step(self, batch, batch_nb):
+    def validation_step(self, batch, batch_nb, split = 'test'):
         rgb_gt = batch['rgb']
         results = self(batch, split='test')
 
@@ -199,7 +248,7 @@ class NeRFSystem(LightningModule):
         self.val_psnr(results['rgb'], rgb_gt)
         logs['psnr'] = self.val_psnr.compute()
         self.val_psnr.reset()
-
+        
         w, h = self.train_dataset.img_wh
         rgb_pred = rearrange(results['rgb'], '(h w) c -> 1 c h w', h=h)
         rgb_gt = rearrange(rgb_gt, '(h w) c -> 1 c h w', h=h)

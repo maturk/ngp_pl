@@ -4,7 +4,7 @@ from .custom_functions import \
 from einops import rearrange
 import vren
 
-MAX_SAMPLES = 1024
+MAX_SAMPLES = 4024 #1024
 NEAR_DISTANCE = 0.01
 
 
@@ -27,6 +27,8 @@ def render(model, rays_o, rays_d, **kwargs):
     _, hits_t, _ = \
         RayAABBIntersector.apply(rays_o, rays_d, model.center, model.half_size, 1)
     hits_t[(hits_t[:, 0, 0]>=0)&(hits_t[:, 0, 0]<NEAR_DISTANCE), 0, 0] = NEAR_DISTANCE
+    #print("model center: ", model.center, 'model half size', model.half_size)
+    #print(hits_t)
 
     if kwargs.get('test_time', False):
         render_func = __render_rays_test
@@ -73,7 +75,7 @@ def __render_rays_test(model, rays_o, rays_d, hits_t, **kwargs):
     min_samples = 1 if exp_step_factor==0 else 4
 
     while samples < kwargs.get('max_samples', MAX_SAMPLES):
-        N_alive = len(alive_indices)
+        N_alive = len(alive_indices)# background nerf?
         if N_alive==0: break
 
         # the number of samples to add on each ray
@@ -111,6 +113,9 @@ def __render_rays_test(model, rays_o, rays_d, hits_t, **kwargs):
 
     if exp_step_factor==0: # synthetic
         rgb_bg = torch.ones(3, device=device)
+        # try random background
+        # background nerf? set density to zero? 
+        #rgb_bg = torch.rand(3, device=rays_o.device)
     else: # real
         rgb_bg = torch.zeros(3, device=device)
     results['rgb'] += rgb_bg*rearrange(1-opacity, 'n -> n 1')
@@ -149,9 +154,9 @@ def __render_rays_train(model, rays_o, rays_d, hits_t, **kwargs):
         VolumeRenderer.apply(sigmas, rgbs.contiguous(), results['deltas'], results['ts'],
                              rays_a, kwargs.get('T_threshold', 1e-4))
     results['rays_a'] = rays_a
-
     if exp_step_factor==0: # synthetic
-        rgb_bg = torch.ones(3, device=rays_o.device)
+        #rgb_bg = torch.ones(3, device=rays_o.device)
+        rgb_bg = torch.rand(3, device=rays_o.device)
     else: # real
         if kwargs.get('random_bg', False):
             rgb_bg = torch.rand(3, device=rays_o.device)

@@ -8,8 +8,7 @@ from einops import rearrange
 def get_ray_directions(H, W, K, device='cpu', random=False, return_uv=False, flatten=True):
     """
     Get ray directions for all pixels in camera coordinate [right down front].
-    Reference: https://www.scratchapixel.com/lessons/3d-basic-rendering/
-               ray-tracing-generating-camera-rays/standard-coordinate-systems
+    Reference: https://www.scratchapixel.com/lessons/3d-basic-rendering/ray-tracing-generating-camera-rays/standard-coordinate-systems
 
     Inputs:
         H, W: image height and width
@@ -41,7 +40,7 @@ def get_ray_directions(H, W, K, device='cpu', random=False, return_uv=False, fla
         return directions, grid
     return directions
 
-
+count = 0
 @torch.cuda.amp.autocast(dtype=torch.float32)
 def get_rays(directions, c2w):
     """
@@ -60,12 +59,23 @@ def get_rays(directions, c2w):
     if c2w.ndim==2:
         # Rotate ray directions from camera coordinate to the world coordinate
         rays_d = directions @ c2w[:, :3].T
+        #rays_d = c2w @ directions
     else:
         rays_d = rearrange(directions, 'n c -> n 1 c') @ \
                  rearrange(c2w[..., :3], 'n a b -> n b a')
+        
         rays_d = rearrange(rays_d, 'n 1 c -> n c')
     # The origin of all rays is the camera origin in world coordinate
     rays_o = c2w[..., 3].expand_as(rays_d)
+    
+    save_o = rays_o.detach().cpu().numpy()
+    save_d = rays_d.detach().cpu().numpy()
+    
+    global count
+    if count == 0:
+        np.savetxt(f'/home/maturk/git/ObjectReconstructor/ngp_pl/datasets/debug/rays_o.txt', save_o)
+        np.savetxt(f'/home/maturk/git/ObjectReconstructor/ngp_pl/datasets/debug/rays_d.txt', save_d)
+        count +=1
 
     return rays_o, rays_d
 

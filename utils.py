@@ -18,7 +18,7 @@ def extract_model_state_dict(ckpt_path, model_name='model', prefixes_to_ignore=[
     return checkpoint_
 
 
-def load_ckpt(model, ckpt_path, model_name='model', prefixes_to_ignore=[]):
+def load_ckpt(model, ckpt_path, model_name='model', prefixes_to_ignore=["density_grid", "grid_coords"]):
     if not ckpt_path: return
     model_dict = model.state_dict()
     checkpoint_ = extract_model_state_dict(ckpt_path, model_name, prefixes_to_ignore)
@@ -37,3 +37,5 @@ def slim_ckpt(ckpt_path, save_poses=False):
     for k in keys_to_pop:
         ckpt['state_dict'].pop(k, None)
     return ckpt['state_dict']
+
+

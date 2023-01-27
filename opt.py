@@ -6,17 +6,17 @@ def get_opts():
     # dataset parameters
     parser.add_argument('--root_dir', type=str, required=True,
                         help='root directory of dataset')
-    parser.add_argument('--dataset_name', type=str, default='nsvf',
-                        choices=['nerf', 'nsvf', 'colmap', 'nerfpp', 'rtmv'],
+    parser.add_argument('--dataset_name', type=str, default='custom',
+                        choices=['nerf', 'nsvf', 'colmap', 'nerfpp', 'rtmv', 'custom'],
                         help='which dataset to train/test')
     parser.add_argument('--split', type=str, default='train',
                         choices=['train', 'trainval', 'trainvaltest'],
                         help='use which split to train')
-    parser.add_argument('--downsample', type=float, default=1.0,
+    parser.add_argument('--downsample', type=float, default=1,
                         help='downsample factor (<=1.0) for the images')
 
     # model parameters
-    parser.add_argument('--scale', type=float, default=0.5,
+    parser.add_argument('--scale', type=float, default=1.0, #1
                         help='scene scale (whole scene must lie in [-scale, scale]^3')
     parser.add_argument('--use_exposure', action='store_true', default=False,
                         help='whether to train in HDR-NeRF setting')
@@ -29,24 +29,24 @@ def get_opts():
                         ''')
 
     # training options
-    parser.add_argument('--batch_size', type=int, default=8192,
+    parser.add_argument('--batch_size', type=int, default= 2048, #2048, #8192
                         help='number of rays in a batch')
     parser.add_argument('--ray_sampling_strategy', type=str, default='all_images',
                         choices=['all_images', 'same_image'],
                         help='''
                         all_images: uniformly from all pixels of ALL images
-                        same_image: uniformly from all pixels of a SAME image
+                        same_image: uniformly from 1ll pixels of a SAME image
                         ''')
-    parser.add_argument('--num_epochs', type=int, default=30,
+    parser.add_argument('--num_epochs', type=int, default=1, # 30
                         help='number of training epochs')
     parser.add_argument('--num_gpus', type=int, default=1,
                         help='number of gpus')
-    parser.add_argument('--lr', type=float, default=1e-2,
+    parser.add_argument('--lr', type=float, default=1e-3,
                         help='learning rate')
     # experimental training options
     parser.add_argument('--optimize_ext', action='store_true', default=False,
                         help='whether to optimize extrinsics')
-    parser.add_argument('--random_bg', action='store_true', default=False,
+    parser.add_argument('--random_bg', action='store_true', default=True,
                         help='''whether to train with random bg color (real scene only)
                         to avoid objects with black color to be predicted as transparent
                         ''')
@@ -54,7 +54,7 @@ def get_opts():
     # validation options
     parser.add_argument('--eval_lpips', action='store_true', default=False,
                         help='evaluate lpips metric (consumes more VRAM)')
-    parser.add_argument('--val_only', action='store_true', default=False,
+    parser.add_argument('--val_only', action='store', default=False,
                         help='run only validation (need to provide ckpt_path)')
     parser.add_argument('--no_save_test', action='store_true', default=False,
                         help='whether to save test image and video')
